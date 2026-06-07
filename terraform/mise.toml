@@ -10,3 +10,14 @@ run = """
 gcloud config set project $TF_VAR_project_id
 gcloud auth application-default set-quota-project $TF_VAR_project_id
 """
+
+[tasks.fmt]
+description = "Format Terraform files"
+run = "terraform fmt -recursive"
+
+[tasks.check]
+description = "Check Terraform formatting and validate configuration"
+run = """
+terraform fmt -check -recursive
+terraform validate
+"""

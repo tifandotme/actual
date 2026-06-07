@@ -1,14 +1,14 @@
-# AGENTS.md - Guide for AI Agents Working with Infrastructure
+# AGENTS.md
 
-This repo manages self-hosted Actual Budget on GCP using Terraform.
+This repo has two scopes:
 
-Always read these files at the start of conversation:
+- Actual Budget infrastructure on GCP, managed with Terraform in `terraform/`
+- Local workflows for Actual Budget data through the `actual` CLI
 
-- main.tf
-- variables.tf
-- outputs.tf
-- mise.toml
+Before changing Terraform, read `terraform/main.tf`, `terraform/variables.tf`, `terraform/outputs.tf`, and `terraform/mise.toml`.
 
-Never run terraform's `apply` or `destroy` commands
+Never run `terraform apply` or `terraform destroy`.
 
-Always run `mise run check` after you reconfigure terraform.
+After changing Terraform, run `cd terraform && mise run check`.
+
+Do not print secrets from `.env`, `terraform/.env`, Actual credentials, session tokens, sync IDs, or encryption passwords.
