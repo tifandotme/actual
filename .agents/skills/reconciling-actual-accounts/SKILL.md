@@ -37,9 +37,38 @@ Default to report-only. Do not create or import Actual transactions unless the u
      --out-dir .reconcile/bca/latest
    ```
 
-4. Read `.reconcile/bca/latest/report.md` locally.
+4. If there are multiple source CSVs, reconcile each CSV independently.
+   - Do not merge BCA CSV rows across files. Overlapping exports can make counts misleading, and BCA exports do not provide a stable transaction ID for safe dedupe.
+   - Query Actual for each CSV's own suggested date range.
+   - Use `--out-dir .reconcile/bca/by-csv/<csv-stem>`.
+
+5. Read `.reconcile/bca/latest/report.md` or the per-CSV reports locally.
    - Summarize counts and next actions.
+   - For multi-CSV runs, inspect the relevant `missing-candidates.json` and `review-candidates.json` before adding transactions.
    - Do not paste transaction descriptions, amounts, account numbers, or payee details unless the user explicitly asks.
+
+## Approval and add workflow
+
+Use this only after the user asks to add missing transactions.
+
+1. Review `approval.md` with the user. It shows one checkbox per missing transaction, with date, amount, description, and nearby Actual hints.
+2. After explicit approval, edit only approved rows from `[ ]` to `[x]`.
+3. Build the Actual CLI add file.
+
+   ```bash
+   bun run .agents/skills/reconciling-actual-accounts/scripts/reconcile-actual-account.ts \
+     --approval-json .reconcile/bca/by-csv/932618592/approval-candidates.json \
+     --approval-md .reconcile/bca/by-csv/932618592/approval.md \
+     --actual-add-out .reconcile/bca/by-csv/932618592/actual-add.json
+   ```
+
+4. Run the mutation per CSV only after approval.
+
+   ```bash
+   bunx @actual-app/cli@latest transactions add \
+     --account ACTUAL_BCA_ACCOUNT_ID \
+     --file .reconcile/bca/by-csv/932618592/actual-add.json
+   ```
 
 ## BCA source rules
 
@@ -70,9 +99,13 @@ Write reconciliation artifacts under `.reconcile/<source>/latest/`:
 - `actual-transactions.json`: normalized Actual transactions
 - `missing-candidates.json`: source rows with no Actual match
 - `review-candidates.json`: missing candidates with nearby same-amount Actual hints
+- `approval-candidates.json`: proposed Actual transactions for missing rows
+- `approval.md`: checkbox review file for human approval
 - `duplicate-groups.json`: date and amount groups where counts differ or duplicates exist
 - `reconcile-result.json`: full result, including matches and unmatched Actual rows
 - `report.md`: human-readable local report
+
+For multiple CSVs, write each CSV's artifacts under `.reconcile/<source>/by-csv/<csv-stem>/`.
 
 These files contain personal financial data. Keep `.reconcile/` gitignored.
 

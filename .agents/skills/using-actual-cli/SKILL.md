@@ -54,3 +54,33 @@ Ask before running any command that creates, imports, updates, deletes, syncs, u
 - Treat command-specific help output as the source of truth for syntax.
 - Prefer `query run` over `transactions list` if `transactions list` hits auth or network failures.
 - Keep Actual CLI work separate from Terraform, GCP, Cloud Run, bucket, IAM, or domain mapping changes.
+
+### Cloud Run cold starts
+
+This repo's Actual server may scale to zero. If the CLI returns `Authentication failed: network-failure`, treat it as possibly transient before debugging credentials.
+
+1. Warm the server.
+
+   ```bash
+   curl -fsS "$ACTUAL_SERVER_URL/info" >/dev/null
+   ```
+
+2. Retry a read-only CLI command with short backoff.
+
+   ```bash
+   for i in 1 2 3 4 5; do
+     bunx @actual-app/cli@latest accounts list --format json && break
+     sleep "$((i * 2))"
+   done
+   ```
+
+3. If it still fails, compare curl and Node networking.
+
+   ```bash
+   curl -fsS -w 'status=%{http_code} total=%{time_total}\n' \
+     "$ACTUAL_SERVER_URL/info" -o /dev/null
+
+   node -e "fetch(process.env.ACTUAL_SERVER_URL + '/info').then(r=>console.log(r.status)).catch(console.error)"
+   ```
+
+Do not conclude credentials are wrong unless login fails after the server is warm.

@@ -18,9 +18,29 @@ interface ActualTransaction {
   date: string;
   amount: number;
   payeeName: string | null;
-  notes: string | null;
-  importedId: string | null;
-  cleared: boolean | null;
+}
+
+interface ActualAddTransaction {
+  date: string;
+  amount: number;
+  imported_payee: string;
+  notes: string;
+  cleared: boolean;
+}
+
+interface ApprovalCandidate {
+  id: string;
+  approved: boolean;
+  csvRowNumber: number;
+  postingDate: string;
+  embeddedDate: string | null;
+  suggestedDate: string;
+  amount: number;
+  amountIdr: number;
+  direction: "CR" | "DB";
+  description: string;
+  possibleNearActual: Pick<ActualTransaction, "date" | "amount" | "payeeName">[];
+  actualTransaction: ActualAddTransaction;
 }
 
 interface MatchRecord {
@@ -39,7 +59,6 @@ interface DuplicateGroup {
 }
 
 interface MissingCandidate extends CsvTransaction {
-  amountIdr: number;
   possibleNearActual: ActualTransaction[];
 }
 
@@ -72,8 +91,9 @@ interface CliOptions {
   nearDays: number;
   actualEndPaddingDays: number;
   printDateRange: boolean;
-  printActualQuery: boolean;
-  accountId?: string;
+  approvalJsonPath?: string;
+  approvalMdPath?: string;
+  actualAddOutPath?: string;
 }
 
 const DATE_RE = /^\d{2}\/\d{2}\/\d{4}$/;
@@ -238,9 +258,6 @@ export function parseActual(path: string): ActualTransaction[] {
       date: String(object.date ?? ""),
       amount: Number(object.amount),
       payeeName: (object["payee.name"] ?? object.payee_name ?? null) as string | null,
-      notes: (object.notes ?? null) as string | null,
-      importedId: (object.imported_id ?? null) as string | null,
-      cleared: (object.cleared ?? null) as boolean | null,
     };
   });
 }
@@ -344,7 +361,7 @@ export function reconcile(
     }
 
     const possibleNearActual = nearActual(row, actualRows, nearDays);
-    const candidate = { ...row, amountIdr: row.amount / 100, possibleNearActual };
+    const candidate = { ...row, possibleNearActual };
     missingCandidates.push(candidate);
     if (possibleNearActual.length > 0) reviewCandidates.push(candidate);
   }
@@ -381,6 +398,63 @@ function writeJson(path: string, value: unknown): void {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
 }
 
+export function approvalCandidates(result: ReconcileResult): ApprovalCandidate[] {
+  return result.missingCandidates.map((row) => {
+    const suggestedDate = row.embeddedDate ?? row.postingDate;
+    return {
+      id: `row-${row.rowNumber}`,
+      approved: false,
+      csvRowNumber: row.rowNumber,
+      postingDate: row.postingDate,
+      embeddedDate: row.embeddedDate,
+      suggestedDate,
+      amount: row.amount,
+      amountIdr: row.amount / 100,
+      direction: row.direction,
+      description: row.description,
+      possibleNearActual: row.possibleNearActual.slice(0, 3).map(({ date, amount, payeeName }) => ({ date, amount, payeeName })),
+      actualTransaction: {
+        date: suggestedDate,
+        amount: row.amount,
+        imported_payee: row.description,
+        notes: `BCA CSV row ${row.rowNumber}; posting date ${row.postingDate}`,
+        cleared: true,
+      },
+    };
+  });
+}
+
+function writeApprovalMarkdown(candidates: ApprovalCandidate[], path: string): void {
+  const lines = ["# BCA missing transaction approvals", "", "Check rows to add to Actual, then build actual-add.json.", ""];
+  for (const candidate of candidates) {
+    const hints = candidate.possibleNearActual.map((row) => `${row.date} ${(row.amount / 100).toFixed(2)} ${row.payeeName ?? ""}`.trim()).join("; ") || "none";
+    lines.push(
+      `- [ ] \`${candidate.id}\` ${candidate.suggestedDate} ${candidate.amountIdr.toFixed(2)} ${candidate.direction} ${candidate.description.replace(/\s+/g, " ")}`,
+      `  - CSV row: ${candidate.csvRowNumber}; posting: ${candidate.postingDate}; embedded: ${candidate.embeddedDate ?? "none"}`,
+      `  - Nearby Actual: ${hints}`,
+    );
+  }
+  writeFileSync(path, `${lines.join("\n")}\n`);
+}
+
+function checkedApprovalIds(path: string): Set<string> {
+  return new Set(
+    readFileSync(path, "utf8")
+      .split(/\r?\n/)
+      .flatMap((line) => line.match(/^- \[[xX]\] `([^`]+)`/)?.[1] ?? []),
+  );
+}
+
+export function approvedTransactions(path: string, markdownPath?: string): ActualAddTransaction[] {
+  const candidates = JSON.parse(readFileSync(path, "utf8")) as ApprovalCandidate[];
+  const approvedIds = markdownPath ? checkedApprovalIds(markdownPath) : null;
+  const transactions = candidates
+    .filter((candidate) => (approvedIds ? approvedIds.has(candidate.id) : candidate.approved))
+    .map((candidate) => candidate.actualTransaction);
+  if (transactions.length === 0) throw new Error("No approved transactions found");
+  return transactions;
+}
+
 function writeReport(result: ReconcileResult, path: string): void {
   const { summary } = result;
   const lines = [
@@ -411,7 +485,7 @@ function writeReport(result: ReconcileResult, path: string): void {
         .map((row) => `${row.date} ${row.payeeName ?? ""}`.trim())
         .join("; ");
       lines.push(
-        `| ${item.postingDate} | ${item.amountIdr.toFixed(2)} | ${item.direction} | ${item.description.replaceAll("|", " ")} | ${nearText} |`,
+        `| ${item.postingDate} | ${(item.amount / 100).toFixed(2)} | ${item.direction} | ${item.description.replaceAll("|", " ")} | ${nearText} |`,
       );
     }
   }
@@ -428,32 +502,12 @@ function writeReport(result: ReconcileResult, path: string): void {
   writeFileSync(path, `${lines.join("\n")}\n`);
 }
 
-function actualQueryCommand(range: ReturnType<typeof csvDateRange>, accountId: string): string {
-  if (!range.suggestedActualStart || !range.suggestedActualEnd) throw new Error("CSV has no transaction date range");
-  const filter = JSON.stringify({
-    account: accountId,
-    date: { $gte: range.suggestedActualStart, $lte: range.suggestedActualEnd },
-    is_parent: false,
-  });
-  return [
-    "mkdir -p .reconcile/bca/latest",
-    "bunx @actual-app/cli@latest query run \\",
-    "  --table transactions \\",
-    "  --select 'id,date,amount,payee.name,notes,imported_id,cleared' \\",
-    `  --filter '${filter}' \\`,
-    "  --order-by 'date:asc' \\",
-    "  --format json \\",
-    "  > .reconcile/bca/latest/actual-query.json",
-  ].join("\n");
-}
-
 function parseArgs(argv: string[]): CliOptions {
   const options: CliOptions = {
     outDir: ".reconcile/bca/latest",
     nearDays: 3,
     actualEndPaddingDays: 3,
     printDateRange: false,
-    printActualQuery: false,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -471,8 +525,9 @@ function parseArgs(argv: string[]): CliOptions {
     else if (arg === "--near-days") options.nearDays = Number(next());
     else if (arg === "--actual-end-padding-days") options.actualEndPaddingDays = Number(next());
     else if (arg === "--print-date-range") options.printDateRange = true;
-    else if (arg === "--print-actual-query") options.printActualQuery = true;
-    else if (arg === "--account-id") options.accountId = next();
+    else if (arg === "--approval-json") options.approvalJsonPath = next();
+    else if (arg === "--approval-md") options.approvalMdPath = next();
+    else if (arg === "--actual-add-out") options.actualAddOutPath = next();
     else if (arg === "--help" || arg === "-h") {
       printHelp();
       process.exit(0);
@@ -487,19 +542,25 @@ function printHelp(): void {
 Usage:
   bun run .agents/skills/reconciling-actual-accounts/scripts/reconcile-actual-account.ts --csv <file> --actual-json <file> [--out-dir <dir>]
   bun run .agents/skills/reconciling-actual-accounts/scripts/reconcile-actual-account.ts --csv <file> --print-date-range
-  bun run .agents/skills/reconciling-actual-accounts/scripts/reconcile-actual-account.ts --csv <file> --print-actual-query --account-id <id>
+  bun run .agents/skills/reconciling-actual-accounts/scripts/reconcile-actual-account.ts --approval-json <file> --approval-md <file> --actual-add-out <file>
 
 Options:
   --near-days <days>                 Same-amount review hint window. Default: 3
   --actual-end-padding-days <days>   Extend suggested Actual end date. Default: 3
   --print-date-range                 Print CSV and suggested Actual query date range
-  --print-actual-query               Print the Actual query command for the CSV date range
-  --account-id <id>                  Actual BCA account ID for --print-actual-query
+  --approval-json <file>             Read approval-candidates.json
+  --approval-md <file>               Read checked approval.md
+  --actual-add-out <file>            Write Actual CLI transactions add JSON
 `);
 }
 
 function main(): void {
   const options = parseArgs(process.argv.slice(2));
+  if (options.approvalJsonPath) {
+    if (!options.actualAddOutPath) throw new Error("Missing --actual-add-out");
+    writeJson(options.actualAddOutPath, approvedTransactions(options.approvalJsonPath, options.approvalMdPath));
+    return;
+  }
   if (!options.csvPath) throw new Error("Missing --csv");
 
   const csvRows = parseBcaCsv(options.csvPath);
@@ -507,12 +568,6 @@ function main(): void {
 
   if (options.printDateRange) {
     console.log(JSON.stringify(range, null, 2));
-    return;
-  }
-
-  if (options.printActualQuery) {
-    if (!options.accountId) throw new Error("Missing --account-id for --print-actual-query");
-    console.log(actualQueryCommand(range, options.accountId));
     return;
   }
 
@@ -524,7 +579,10 @@ function main(): void {
   writeJson(join(options.outDir, "parsed-csv.json"), csvRows);
   writeJson(join(options.outDir, "actual-transactions.json"), actualRows);
   writeJson(join(options.outDir, "missing-candidates.json"), result.missingCandidates);
+  const candidates = approvalCandidates(result);
   writeJson(join(options.outDir, "review-candidates.json"), result.reviewCandidates);
+  writeJson(join(options.outDir, "approval-candidates.json"), candidates);
+  writeApprovalMarkdown(candidates, join(options.outDir, "approval.md"));
   writeJson(join(options.outDir, "duplicate-groups.json"), result.duplicateGroups);
   writeJson(join(options.outDir, "reconcile-result.json"), result);
   writeReport(result, join(options.outDir, "report.md"));

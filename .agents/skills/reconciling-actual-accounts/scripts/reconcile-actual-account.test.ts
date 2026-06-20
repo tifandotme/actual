@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { csvDateRange, parseActual, parseBcaCsv, reconcile } from "./reconcile-actual-account";
+import { approvalCandidates, approvedTransactions, csvDateRange, parseActual, parseBcaCsv, reconcile } from "./reconcile-actual-account";
 
 const skillDir = join(import.meta.dir, "..");
 const csvPath = join(skillDir, "fixtures", "sample-mutasi.csv");
@@ -46,5 +48,27 @@ describe("Actual account reconciliation", () => {
       suggestedActualStart: "2025-12-31",
       suggestedActualEnd: "2026-01-09",
     });
+  });
+
+  test("builds an approved Actual add file from reviewed candidates", () => {
+    const result = reconcile(parseBcaCsv(csvPath), parseActual(actualPath), 3, 3);
+    const candidates = approvalCandidates(result);
+    candidates[0]!.approved = true;
+    candidates[1]!.approved = false;
+
+    const path = join(mkdtempSync(join(tmpdir(), "actual-reconcile-")), "approval-candidates.json");
+    const approvalMdPath = join(mkdtempSync(join(tmpdir(), "actual-reconcile-md-")), "approval.md");
+    writeFileSync(path, JSON.stringify(candidates));
+    writeFileSync(approvalMdPath, "- [x] `row-10` approve me\n- [ ] `row-11` skip me\n");
+
+    expect(approvedTransactions(path, approvalMdPath)).toEqual([
+      {
+        date: "2026-01-03",
+        amount: -70000,
+        imported_payee: "MISSING WITH NEAR HINT",
+        notes: "BCA CSV row 10; posting date 2026-01-03",
+        cleared: true,
+      },
+    ]);
   });
 });
