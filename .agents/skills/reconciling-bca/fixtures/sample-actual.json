@@ -1,0 +1,74 @@
+[
+  {
+    "id": "actual-prior",
+    "date": "2025-12-31",
+    "amount": 4200,
+    "payee.name": "Prior year payee",
+    "notes": null,
+    "imported_id": "import-prior",
+    "cleared": true
+  },
+  {
+    "id": "actual-exact",
+    "date": "2026-01-01",
+    "amount": -100000,
+    "payee.name": "Exact payee",
+    "notes": null,
+    "imported_id": "import-exact",
+    "cleared": true
+  },
+  {
+    "id": "actual-embedded",
+    "date": "2026-01-01",
+    "amount": -50000,
+    "payee.name": "Embedded payee",
+    "notes": null,
+    "imported_id": "import-embedded",
+    "cleared": true
+  },
+  {
+    "id": "actual-boundary",
+    "date": "2025-12-31",
+    "amount": -30000,
+    "payee.name": "Boundary payee",
+    "notes": null,
+    "imported_id": "import-boundary",
+    "cleared": true
+  },
+  {
+    "id": "actual-near",
+    "date": "2026-01-05",
+    "amount": -70000,
+    "payee.name": "Near payee",
+    "notes": null,
+    "imported_id": "import-near",
+    "cleared": true
+  },
+  {
+    "id": "actual-duplicate",
+    "date": "2026-01-04",
+    "amount": 10000,
+    "payee.name": "Duplicate payee",
+    "notes": null,
+    "imported_id": "import-duplicate",
+    "cleared": true
+  },
+  {
+    "id": "actual-decimal",
+    "date": "2026-01-05",
+    "amount": 25050,
+    "payee.name": "Decimal payee",
+    "notes": null,
+    "imported_id": "import-decimal",
+    "cleared": true
+  },
+  {
+    "id": "actual-fee",
+    "date": "2026-01-06",
+    "amount": -1000,
+    "payee.name": "Fee payee",
+    "notes": null,
+    "imported_id": "import-fee",
+    "cleared": true
+  }
+]
