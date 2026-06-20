@@ -1,12 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
-import { csvDateRange, parseActual, parseBcaCsv, reconcile } from "./reconcile-bca";
+import { csvDateRange, parseActual, parseBcaCsv, reconcile } from "./reconcile-actual-account";
 
 const skillDir = join(import.meta.dir, "..");
 const csvPath = join(skillDir, "fixtures", "sample-mutasi.csv");
 const actualPath = join(skillDir, "fixtures", "sample-actual.json");
 
-describe("BCA reconciliation", () => {
+describe("Actual account reconciliation", () => {
   test("parses KlikBCA metadata, footer rows, decimal amounts, and embedded TGL dates", () => {
     const rows = parseBcaCsv(csvPath);
 

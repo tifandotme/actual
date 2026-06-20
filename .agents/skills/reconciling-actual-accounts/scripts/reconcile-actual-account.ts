@@ -384,7 +384,7 @@ function writeJson(path: string, value: unknown): void {
 function writeReport(result: ReconcileResult, path: string): void {
   const { summary } = result;
   const lines = [
-    "# BCA reconciliation report",
+    "# Actual account reconciliation report",
     "",
     `CSV transactions: ${summary.csvTransactions}`,
     `Actual transactions: ${summary.actualTransactions}`,
@@ -437,7 +437,7 @@ function actualQueryCommand(range: ReturnType<typeof csvDateRange>, accountId: s
   });
   return [
     "mkdir -p .reconcile/bca/latest",
-    "actual query run \\",
+    "bunx @actual-app/cli@latest query run \\",
     "  --table transactions \\",
     "  --select 'id,date,amount,payee.name,notes,imported_id,cleared' \\",
     `  --filter '${filter}' \\`,
@@ -485,9 +485,9 @@ function printHelp(): void {
   console.log(`Compare a KlikBCA Mutasi Rekening CSV with Actual BCA transactions.
 
 Usage:
-  bun run .agents/skills/reconciling-bca/scripts/reconcile-bca.ts --csv <file> --actual-json <file> [--out-dir <dir>]
-  bun run .agents/skills/reconciling-bca/scripts/reconcile-bca.ts --csv <file> --print-date-range
-  bun run .agents/skills/reconciling-bca/scripts/reconcile-bca.ts --csv <file> --print-actual-query --account-id <id>
+  bun run .agents/skills/reconciling-actual-accounts/scripts/reconcile-actual-account.ts --csv <file> --actual-json <file> [--out-dir <dir>]
+  bun run .agents/skills/reconciling-actual-accounts/scripts/reconcile-actual-account.ts --csv <file> --print-date-range
+  bun run .agents/skills/reconciling-actual-accounts/scripts/reconcile-actual-account.ts --csv <file> --print-actual-query --account-id <id>
 
 Options:
   --near-days <days>                 Same-amount review hint window. Default: 3

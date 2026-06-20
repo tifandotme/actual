@@ -24,14 +24,14 @@ Default to report-only. Do not create or import Actual transactions unless the u
 3. Run the reconciliation script.
 
    ```bash
-   bun run .agents/skills/reconciling-actual-accounts/scripts/reconcile-bca.ts \
+   bun run .agents/skills/reconciling-actual-accounts/scripts/reconcile-actual-account.ts \
      --csv exports/TIFANDWI3006_932618592.CSV \
      --print-date-range
    ```
 
    ```bash
    mkdir -p .reconcile/bca/latest
-   bun run .agents/skills/reconciling-actual-accounts/scripts/reconcile-bca.ts \
+   bun run .agents/skills/reconciling-actual-accounts/scripts/reconcile-actual-account.ts \
      --csv exports/TIFANDWI3006_932618592.CSV \
      --actual-json .reconcile/bca/latest/actual-query.json \
      --out-dir .reconcile/bca/latest
@@ -81,7 +81,7 @@ These files contain personal financial data. Keep `.reconcile/` gitignored.
 Run the fixture tests after editing the script. Use an absolute path because Bun may ignore tests under hidden directories when passed as a relative pattern.
 
 ```bash
-bun test "$PWD/.agents/skills/reconciling-actual-accounts/scripts/reconcile-bca.test.ts"
+bun test "$PWD/.agents/skills/reconciling-actual-accounts/scripts/reconcile-actual-account.test.ts"
 ```
 
 ## Safety
