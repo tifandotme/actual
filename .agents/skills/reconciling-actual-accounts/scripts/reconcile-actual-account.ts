@@ -425,7 +425,13 @@ export function approvalCandidates(result: ReconcileResult): ApprovalCandidate[]
 }
 
 function writeApprovalMarkdown(candidates: ApprovalCandidate[], path: string): void {
-  const lines = ["# BCA missing transaction approvals", "", "Check rows to add to Actual, then build actual-add.json.", ""];
+  const lines = [
+    "# BCA missing transaction approvals",
+    "",
+    "Check rows to approve, then tell the agent when ready. Wait for final confirmation before anything is added to Actual.",
+    "Details live in approval-candidates.json and report.md.",
+    "",
+  ];
   for (const candidate of candidates) {
     const hints = candidate.possibleNearActual.map((row) => `${row.date} ${(row.amount / 100).toFixed(2)} ${row.payeeName ?? ""}`.trim()).join("; ") || "none";
     lines.push(

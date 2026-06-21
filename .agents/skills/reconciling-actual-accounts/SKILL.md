@@ -7,7 +7,7 @@ description: Compares external bank, card, or wallet exports with Actual Budget 
 
 Find source transactions that are present in a bank, card, or wallet export but missing from the matching Actual Budget account.
 
-Default to report-only. Do not create or import Actual transactions unless the user explicitly asks in the same session.
+Default to report-only. Adding transactions is a two-confirmation flow: user marks rows for approval, then confirms the final add command after seeing the count.
 
 ## Workflow
 
@@ -43,17 +43,18 @@ Default to report-only. Do not create or import Actual transactions unless the u
    - Use `--out-dir .reconcile/bca/by-csv/<csv-stem>`.
 
 5. Read `.reconcile/bca/latest/report.md` or the per-CSV reports locally.
-   - Summarize counts and next actions.
-   - For multi-CSV runs, inspect the relevant `missing-candidates.json` and `review-candidates.json` before adding transactions.
+   - Summarize counts and point the user to `approval.md` when missing candidates exist.
+   - Ask the user to mark approved row IDs in `approval.md` and tell you when ready.
+   - Stop there until the user responds. Do not build `actual-add.json` yet.
    - Do not paste transaction descriptions, amounts, account numbers, or payee details unless the user explicitly asks.
 
 ## Approval and add workflow
 
-Use this only after the user asks to add missing transactions.
+Use this only after the user says they finished marking `approval.md`.
 
-1. Review `approval.md` with the user. It shows one checkbox per missing transaction, with date, amount, description, and nearby Actual hints.
-2. After explicit approval, edit only approved rows from `[ ]` to `[x]`.
-3. Build the Actual CLI add file.
+`approval.md` is a control file. The script deterministically reads checked lines matching `- [x] \`row-N\``and maps those IDs through`approval-candidates.json`.
+
+1. Build the Actual CLI add file from checked rows only.
 
    ```bash
    bun run .agents/skills/reconciling-actual-accounts/scripts/reconcile-actual-account.ts \
@@ -62,7 +63,8 @@ Use this only after the user asks to add missing transactions.
      --actual-add-out .reconcile/bca/by-csv/932618592/actual-add.json
    ```
 
-4. Run the mutation per CSV only after approval.
+2. Count the transactions in `actual-add.json`, summarize the count only, and ask for final confirmation to add them.
+3. Run the mutation per CSV only after that final confirmation.
 
    ```bash
    bunx @actual-app/cli@latest transactions add \
