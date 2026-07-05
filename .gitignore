@@ -1,0 +1,8 @@
+.reconcile/
+.actual-cache/
+.actual-fresh-cache/
+.cache-backups/
+.categorize/
+.budget-apply.log
+exports/
+__pycache__/
