@@ -61,6 +61,7 @@ interface ApprovalCandidate {
   sourceTarget: string;
   detail: string;
   note: string;
+  riskTags: string[];
   possibleNearActual: Pick<ActualTransaction, "date" | "amount" | "payeeName">[];
   actualTransaction: ActualAddTransaction;
 }
@@ -383,6 +384,15 @@ function rowHash(row: ApprovalCandidate): string {
   return createHash("sha256").update(`${row.sourceAccount}\t${row.date}\t${row.amount}\t${row.sourceTarget}\t${row.detail}\t${row.note}`).digest("hex").slice(0, 12);
 }
 
+export function candidateRiskTags(row: { sourceTarget: string; detail: string; note: string; jagoIds: string[]; possibleNearActual: unknown[] }): string[] {
+  const text = compact(`${row.sourceTarget} ${row.detail} ${row.note}`);
+  const tags: string[] = [];
+  if (/\bgrab\*/i.test(row.sourceTarget) || text.includes("transaksi pos") || text.includes("google*")) tags.push("receipt-backed");
+  if (row.possibleNearActual.length > 0) tags.push("nearby-actual");
+  if (row.jagoIds.length !== 1) tags.push("id-problem");
+  return tags;
+}
+
 export function approvalCandidates(result: ReconcileResult): ApprovalCandidate[] {
   return result.missingCandidates.map((row) => {
     const jagoId = row.jagoIds.length === 1 ? row.jagoIds[0]! : null;
@@ -399,6 +409,7 @@ export function approvalCandidates(result: ReconcileResult): ApprovalCandidate[]
       sourceTarget: row.sourceTarget,
       detail: row.detail,
       note: row.note,
+      riskTags: candidateRiskTags(row),
       possibleNearActual: row.possibleNearActual.slice(0, 3).map(({ date, amount, payeeName }) => ({ date, amount, payeeName })),
       actualTransaction: {
         date: row.date,
@@ -512,14 +523,65 @@ function writeBalanceFixMarkdown(recommendation: BalanceFixRecommendation, path:
 
 function writeRecommendedApprovalMarkdown(sourcePath: string, recommendation: BalanceFixRecommendation, targetPath: string): void {
   const ids = new Set(recommendation.solutions[0]?.candidates.map((candidate) => candidate.id) ?? []);
-  const lines = readFileSync(sourcePath, "utf8")
+  const lines = checkedCopyLines(sourcePath, ids);
+  writeFileSync(targetPath, `${lines.join("\n")}\n`);
+}
+
+function checkedCopyLines(sourcePath: string, checkedIds: Set<string>): string[] {
+  return readFileSync(sourcePath, "utf8")
     .split(/\r?\n/)
     .map((line) => {
       if (!line.startsWith("- [ ]")) return line;
       const id = line.match(/`([^`]+)`/)?.[1];
-      return id && ids.has(id) ? line.replace("- [ ]", "- [x]") : line;
+      return id && checkedIds.has(id) ? line.replace("- [ ]", "- [x]") : line;
     });
+}
+
+function writeSafeBackfillApprovalMarkdown(candidates: ApprovalCandidate[], recommendation: BalanceFixRecommendation, targetPath: string): void {
+  const safeCandidates = candidates.filter((candidate) => candidate.riskTags.length === 0);
+  const safeSolution = recommendation.solutions.find((solution) => solution.candidates.every((candidate) => candidate.riskTags.length === 0));
+  const checkedIds = new Set(safeSolution?.candidates.map((candidate) => candidate.id) ?? []);
+  const lines = [
+    "# Safe Jago PDF backfill approvals",
+    "",
+    "Only rows without receipt/id/nearby-Actual risk tags are listed here.",
+    "Rows are pre-checked only when they exactly fix the balance.",
+    "Use `ledger-requeue-candidates.md` first for receipt-backed rows.",
+    "",
+  ];
+  if (safeCandidates.length === 0) lines.push("No safe PDF backfill candidates found.");
+  for (const candidate of safeCandidates) lines.push(...approvalCandidateLines(candidate, checkedIds.has(candidate.id)));
   writeFileSync(targetPath, `${lines.join("\n")}\n`);
+}
+
+function writeLedgerRequeueMarkdown(candidates: ApprovalCandidate[], path: string): void {
+  const receiptBacked = candidates.filter((candidate) => candidate.riskTags.includes("receipt-backed"));
+  const lines = [
+    "# Ledger requeue candidates",
+    "",
+    "These rows look receipt-backed. Search Gmail/Actual first, then mark matching `ToBudget/*` emails unread instead of PDF-backfilling when possible.",
+    "",
+  ];
+  if (receiptBacked.length === 0) lines.push("No receipt-backed candidates found.");
+  else {
+    lines.push("| approval id | date | amount IDR | account | risk tags | source/target | detail |", "| --- | --- | ---: | --- | --- | --- | --- |");
+    for (const candidate of receiptBacked) {
+      const esc = (value: unknown) => String(value ?? "").replaceAll("|", " ");
+      lines.push(`| \`${candidate.id}\` | ${candidate.date} | ${candidate.amountIdr} | ${esc(candidate.sourceAccount)} | ${candidate.riskTags.join(", ")} | ${esc(candidate.sourceTarget)} | ${esc(candidate.detail)} |`);
+    }
+  }
+  writeFileSync(path, `${lines.join("\n")}\n`);
+}
+
+function approvalCandidateLines(candidate: ApprovalCandidate, checked = false): string[] {
+  const hints = candidate.possibleNearActual.map((row) => `${row.date} ${(row.amount / 100).toFixed(2)} ${row.payeeName ?? ""}`.trim()).join("; ") || "none";
+  return [
+    `- [${checked ? "x" : " "}] \`${candidate.id}\` ${candidate.date} ${candidate.amountIdr.toFixed(2)} ${candidate.sourceAccount} ${candidate.sourceTarget} ${candidate.detail}`,
+    `  - Jago ID: ${candidate.jagoId ?? "missing"}; source: ${candidate.sourcePdf}; row: ${candidate.rowNumber}`,
+    `  - Risk tags: ${candidate.riskTags.join(", ") || "none"}`,
+    `  - Note: ${candidate.note || "none"}`,
+    `  - Nearby Actual: ${hints}`,
+  ];
 }
 
 function writeApprovalMarkdown(candidates: ApprovalCandidate[], path: string): void {
@@ -530,15 +592,7 @@ function writeApprovalMarkdown(candidates: ApprovalCandidate[], path: string): v
     "Details live in approval-candidates.json and report.md.",
     "",
   ];
-  for (const candidate of candidates) {
-    const hints = candidate.possibleNearActual.map((row) => `${row.date} ${(row.amount / 100).toFixed(2)} ${row.payeeName ?? ""}`.trim()).join("; ") || "none";
-    lines.push(
-      `- [ ] \`${candidate.id}\` ${candidate.date} ${candidate.amountIdr.toFixed(2)} ${candidate.sourceAccount} ${candidate.sourceTarget} ${candidate.detail}`,
-      `  - Jago ID: ${candidate.jagoId ?? "missing"}; source: ${candidate.sourcePdf}; row: ${candidate.rowNumber}`,
-      `  - Note: ${candidate.note || "none"}`,
-      `  - Nearby Actual: ${hints}`,
-    );
-  }
+  for (const candidate of candidates) lines.push(...approvalCandidateLines(candidate));
   writeFileSync(path, `${lines.join("\n")}\n`);
 }
 
@@ -684,6 +738,8 @@ function main(): void {
   writeApprovalMarkdown(candidates, approvalPath);
   writeBalanceFixMarkdown(recommendation, join(options.outDir, "recommended-balance-fix-candidates.md"));
   writeRecommendedApprovalMarkdown(approvalPath, recommendation, join(options.outDir, "recommended-approval.md"));
+  writeSafeBackfillApprovalMarkdown(candidates, recommendation, join(options.outDir, "safe-pdf-backfill-approval.md"));
+  writeLedgerRequeueMarkdown(candidates, join(options.outDir, "ledger-requeue-candidates.md"));
   writeReport(result, join(options.outDir, "report.md"));
   console.log(JSON.stringify({ ...result.summary, reconciliationStartDate, actualClearedBalanceRupiah: actualBalance, bankBalanceRupiah: bankBalance, targetDeltaRupiah: recommendation.targetDeltaRupiah, recommendedSets: recommendation.solutions.length }, null, 2));
 }

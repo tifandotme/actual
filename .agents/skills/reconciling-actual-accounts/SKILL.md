@@ -82,11 +82,13 @@ Use this when reconciling Jago exports from `exports/jago/` against Actual accou
 4. Review these script-generated files only:
    - `report.md`: counts and date range
    - `approval.md`: all missing candidates, unchecked
+   - `ledger-requeue-candidates.md`: receipt-backed rows to search/requeue through Ledger first
+   - `safe-pdf-backfill-approval.md`: safer PDF backfill rows, pre-checked only when an exact safe set exists
    - `recommended-balance-fix-candidates.md`: exact-sum candidate sets
-   - `recommended-approval.md`: first recommended set pre-checked
+   - `recommended-approval.md`: first exact-sum set pre-checked, may include receipt-backed rows
    - `approval-candidates.json`: control file used to build Actual add JSON
 
-Do not create recommendation markdown by hand.
+Prefer Ledger requeue before PDF backfill for receipt-backed rows. Do not create recommendation markdown by hand.
 
 ## Approval and add workflow
 
@@ -164,6 +166,8 @@ For Jago, `.reconcile/jago/latest/` contains only:
 
 - `approval-candidates.json`
 - `approval.md`
+- `ledger-requeue-candidates.md`
+- `safe-pdf-backfill-approval.md`
 - `recommended-balance-fix-candidates.md`
 - `recommended-approval.md`
 - `report.md`
