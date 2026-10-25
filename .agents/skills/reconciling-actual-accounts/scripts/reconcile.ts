@@ -33,7 +33,6 @@ const RULES: Rule[] = [
   { account: BCA, test: /BI-FAST (DB|CR).*TRANSFER.*TIFAN DWI AVIANTO/i, transfer: JAGO },
   { account: BCA, test: /TARIKAN ATM/i, transfer: CASH },
   { account: BCA, test: /SHOPEEPAY/i, transfer: SHOPEEPAY },
-  { account: BCA, test: /AIRPAY INTERNATION/i, payee: "Shopee Indonesia" },
   { account: BCA, test: /BIAYA TXN|BIAYA ADM|^BUNGA|KOREKSI BUNGA|PAJAK BUNGA/i, payee: "BCA" },
   { account: JAGO, test: /Pencairan Reksa Dana/i, transfer: "Dana Darurat" },
   { account: JAGO, test: /TIFAN DWI AVIANTO.*BCA/i, transfer: BCA },
@@ -588,7 +587,7 @@ export function buildPlan(actual: ActualData, sources: Map<string, Source>, deci
         const sched = actual.schedules.find((x) => x.name === (o.schedule ?? rule?.schedule)) ?? (byAmount.length === 1 ? byAmount[0] : undefined);
         const payee = transfer ? transferPayee(transfer) : ((o.payee && payeeId(o.payee)) ?? (sched?.payee as string | undefined) ?? (rule?.payee ? payeeId(rule.payee) : undefined));
         const date = o.date ?? s.date;
-        const txn: Record<string, unknown> = { date, amount: s.amount, cleared: true, notes: `${s.ref}: ${s.description}`.slice(0, 250), imported_payee: s.description.slice(0, 100) };
+        const txn: Record<string, unknown> = { date, amount: s.amount, cleared: true, notes: s.description.slice(0, 250), imported_payee: s.description.slice(0, 100) };
         if (payee) txn.payee = payee;
         if (payee && !transfer && actual.lastCategory.get(payee)) txn.category = actual.lastCategory.get(payee);
         if (sched) txn.schedule = sched.id;

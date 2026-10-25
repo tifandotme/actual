@@ -39,7 +39,7 @@ Create rules only for recurring imported names. Do not create one-off rules.
 ## Local merchant notes
 
 - `Kimsyahla Fashion`, `Fit Hub Itc Kuningan`, and `Jumpstart` are dining/takeout.
-- `Endang Sri Wijayanti` is BPJS Kesehatan and maps to `🛡️ Insurance`.
+- `Endang Sri Wijayanti` is the user's mom (payee `Mum`). Her monthly transfers are BPJS Kesehatan and map to `🛡️ Insurance`.
 - `Pajak Bunga ...` maps to `% Taxes`; `Bunga ...` maps to `🪙 Interests`.
 - Bank fees (`BIAYA TXN`, `BIAYA ADM`, Jago `Biaya dari Kekurangan Saldo`) map to `📦 Other`.
 - Blank payees stay manual.
