@@ -1,191 +1,79 @@
 ---
 name: reconciling-actual-accounts
-description: Compares external bank, card, or wallet exports with Actual Budget accounts and reports source transactions missing from Actual. Use when reconciling Actual accounts, bank CSVs, wallet exports, KlikBCA Mutasi Rekening, BCA, or other financial exports.
+description: Reconciles Actual Budget accounts (BCA, Jago, ShopeePay, Cash) with bank exports and app balances, then locks them. Use when reconciling Actual accounts, checking bank exports against Actual, or finding transactions missing from Actual.
 ---
 
 # Reconciling Actual accounts
 
-Find source transactions that are present in a bank, card, or wallet export but missing from the matching Actual Budget account.
+One run closes every on-budget account from its last reconcile to today: BCA, `Jago (Utama+GoPay)`, ShopeePay, Cash. The user's steps are in [MANUAL.md](MANUAL.md); point them there when inputs are missing.
 
-Default to report-only. Adding transactions is a two-confirmation flow: user marks rows for approval, then confirms the final add command after seeing the count.
+```bash
+s=.agents/skills/reconciling-actual-accounts/scripts/reconcile.ts
+bun $s plan --balance "BCA=<BCA Mobile>" --balance "ShopeePay=<app>" --balance "Cash=<counted>"
+bun $s apply
+```
 
-## Workflow
+`plan` is read-only. It writes `.reconcile/<today>/PLAN.md` and `plan.json`. `apply` writes to Actual.
 
-1. Identify the source export and target Actual account.
-   - For BCA, use the Actual account named exactly `BCA`.
-   - Treat the source export as the source of truth.
-   - The main report answers: which source rows are not represented in Actual?
+## Steps
 
-2. Use the `using-actual-cli` skill for account lookup and transaction queries.
-   - Prefer `bunx @actual-app/cli@latest` for Actual CLI commands.
-   - Query Actual for the source export's date range.
-   - Keep account IDs, credentials, sync IDs, tokens, and passwords out of summaries.
+1. **Inputs.** Get the three balances from the user. Check that `exports/` holds what MANUAL.md lists. If `exports/shopeepay/` has screenshots, transcribe the ShopeePay Balance rows dated on or after the ShopeePay last reconcile into `exports/shopeepay/history.csv`:
 
-3. Run the reconciliation script.
-
-   ```bash
-   bun run .agents/skills/reconciling-actual-accounts/scripts/reconcile-actual-account.ts \
-     --csv exports/TIFANDWI3006_932618592.CSV \
-     --print-date-range
+   ```csv
+   date,amount,description
+   2026-10-20,-25000,Shopee Marketplace
+   2026-10-21,50000,Top Up BCA
    ```
 
-   ```bash
-   mkdir -p .reconcile/bca/latest
-   bun run .agents/skills/reconciling-actual-accounts/scripts/reconcile-actual-account.ts \
-     --csv exports/TIFANDWI3006_932618592.CSV \
-     --actual-json .reconcile/bca/latest/actual-query.json \
-     --out-dir .reconcile/bca/latest
+   Signed IDR, newest or oldest first. Without the file, ShopeePay closes by a balance adjustment.
+
+2. **Plan.** Run `plan`. Done when it prints no `BLOCKERS`. For each blocker, investigate with the exports and Actual (`using-actual-cli`), then record the decision in `.reconcile/<today>/decisions.json` and re-run `plan`:
+
+   ```json
+   {
+     "skip": ["<source ref>"],
+     "override": {
+       "<source ref>": {
+         "transfer": "<account>",
+         "payee": "<payee>",
+         "schedule": "<schedule name>",
+         "date": "YYYY-MM-DD"
+       }
+     },
+     "delete": [{ "id": "<actual id>", "reason": "..." }],
+     "keep": ["<actual id>"],
+     "update": [{ "id": "<actual id>", "fields": { "amount": -1250000 }, "reason": "..." }],
+     "adjust": { "<account>": "<reason for a balance adjustment>" }
+   }
    ```
 
-4. If there are multiple source CSVs, reconcile each CSV independently.
-   - Do not merge BCA CSV rows across files. Overlapping exports can make counts misleading, and BCA exports do not provide a stable transaction ID for safe dedupe.
-   - Query Actual for each CSV's own suggested date range.
-   - Use `--out-dir .reconcile/bca/by-csv/<csv-stem>`.
+   Use `adjust` only when the cause is known and no row can carry it. A **day-end check** line marks a window where Actual and the bank drift apart; a gap that opens and closes within 4 days is settlement lag, a gap that stays is a missing or wrong row.
 
-5. Read `.reconcile/bca/latest/report.md` or the per-CSV reports locally.
-   - Summarize counts and point the user to `approval.md` when missing candidates exist.
-   - Ask the user to mark approved row IDs in `approval.md` and tell you when ready.
-   - Stop there until the user responds. Do not build `actual-add.json` yet.
-   - Do not paste transaction descriptions, amounts, account numbers, or payee details unless the user explicitly asks.
+3. **Approve.** Show the user the account table from PLAN.md and summarize each account's adds, deletes, updates, and decisions. Wait for "apply".
 
-## Jago PDF workflow
+4. **Apply.** Run `apply`. It backs up `.actual-cache` to `.reconcile/<today>/backup/`, then deletes, updates, adds (transfers create their counterpart), advances linked schedules, checks every balance against the bank, and locks the accounts. Each step (and each account's adds) leaves a `.done-*` marker, so a rerun after a failure resumes; `plan` clears the markers. Done when it prints every account at its bank balance.
 
-Use this when reconciling Jago exports from `exports/jago/` against Actual account `Jago (Utama+GoPay)`.
+5. Offer `/categorizing-actual-transactions` for added rows without a category.
 
-1. Require exactly two PDFs in `exports/jago/`: one `Kantong Utama`, one `GoPay Tabungan`.
-2. Query all non-parent Actual transactions for `Jago (Utama+GoPay)`, including `cleared` and `reconciled`.
+## How `plan` decides
 
-   ```bash
-   mkdir -p .reconcile/jago/latest
-   bunx @actual-app/cli@latest query run \
-     --table transactions \
-     --select 'id,date,amount,payee.name,notes,imported_id,cleared,reconciled' \
-     --filter '{"account":"ACTUAL_JAGO_ACCOUNT_ID","is_parent":false}' \
-     --order-by 'date:asc' \
-     --format json \
-     > .reconcile/jago/latest/actual-query.json
-   ```
+- **Window**: from each account's last reconcile (`last_reconciled`), or `--since YYYY-MM-DD`. Exports that start after it block the run; get the missing export instead of deleting Actual rows.
+- **Sources**: BCA statements win over KlikBCA CSVs for their months; segments must chain balance to balance. Jago drops internal rows and PSD02-R reversal pairs. Each source proves its own running balance and fails hard when it does not.
+- **Matching**: same date and amount, then nearest within 4 days, then two Actual rows summing to one bank row (Starbucks 50,000 + 1,000 fee), then an unlocked same-amount row within 31 days to redate.
+- **Net-zero patterns**: n8n `…admin` fee rows whose payment matched are deleted; BCA includes the fee in the payment.
+- **New rows**: `RULES` in the script decides transfers (BCA↔Jago, ATM→Cash, BCA→ShopeePay, Bibit→Jago) and payees. When the other account already has the row as a plain payment, the plan changes that row's payee to the transfer payee and Actual creates this side. The only fixed-amount schedule on the account with that amount links the row; category comes from the payee's latest use.
+- **Residual**: cents close automatically; Cash and ShopeePay without history close by adjustment; anything else blocks.
 
-3. Run the reconciliation. The script derives:
-   - reconciliation start date from the latest `reconciled: true` Actual transaction
-   - Jago app balance from the two PDF `Saldo terbaru` values
-   - Actual cleared balance from Actual rows where `cleared: true`
-   - recommendation target delta from `bank balance - Actual cleared balance`
+## Gotchas
 
-   ```bash
-   bun run .agents/skills/reconciling-actual-accounts/scripts/reconcile-jago-pdfs.ts \
-     --actual-json .reconcile/jago/latest/actual-query.json \
-     --exports-dir exports/jago \
-     --out-dir .reconcile/jago/latest
-   ```
-
-4. Review these script-generated files only:
-   - `report.md`: counts and date range
-   - `approval.md`: all missing candidates, unchecked
-   - `ledger-requeue-candidates.md`: receipt-backed rows to search/requeue through Ledger first
-   - `safe-pdf-backfill-approval.md`: safer PDF backfill rows, pre-checked only when an exact safe set exists
-   - `recommended-balance-fix-candidates.md`: exact-sum candidate sets
-   - `recommended-approval.md`: first exact-sum set pre-checked, may include receipt-backed rows
-   - `approval-candidates.json`: control file used to build Actual add JSON
-
-Prefer Ledger requeue before PDF backfill for receipt-backed rows. Do not create recommendation markdown by hand.
-
-## Approval and add workflow
-
-Use this only after the user says they finished marking `approval.md`.
-
-`approval.md` is a control file. The scripts deterministically read checked lines and map those IDs through `approval-candidates.json`.
-
-1. Build the Actual CLI add file from checked rows only.
-
-   ```bash
-   bun run .agents/skills/reconciling-actual-accounts/scripts/reconcile-jago-pdfs.ts \
-     --approval-json .reconcile/jago/latest/approval-candidates.json \
-     --approval-md .reconcile/jago/latest/recommended-approval.md \
-     --actual-add-out .reconcile/jago/latest/actual-add.json
-   ```
-
-2. Count the transactions in `actual-add.json`, summarize the count only, and ask for final confirmation to add them.
-3. Run the mutation only after that final confirmation.
-
-   ```bash
-   bunx @actual-app/cli@latest transactions add \
-     --account ACTUAL_JAGO_ACCOUNT_ID \
-     --file .reconcile/jago/latest/actual-add.json
-   ```
-
-## Jago source rules
-
-Use these rules for Jago PDF exports:
-
-1. Treat `Kantong Utama` and `GoPay Tabungan` PDFs as one virtual source account because Actual has one merged account.
-2. Exclude internal rows: `Pindah uang antar Kantong`, `Tambah Uang Kantong`, `Tarik Uang Kantong`, `auto sweep`, and `Pencairan Dana dari GoPay`.
-3. Classify unknown rows for review. Do not infer internal/external from the GoPay 100000 IDR auto-fillup threshold.
-4. Match external rows by exact date and exact signed amount only.
-5. Use nearby same-amount Actual rows only as review hints.
-6. Approved PDF backfills use `imported_id` as `jago-pdf:<Jago ID#>`. Approved rows without exactly one Jago ID must fail before add JSON is trusted.
-
-## BCA source rules
-
-Use these rules for KlikBCA Mutasi Rekening CSV exports:
-
-1. Parse only transaction rows. Skip metadata, balances, and footer rows.
-2. Convert dates from `DD/MM/YYYY` to `YYYY-MM-DD`.
-3. Convert amounts to Actual's integer amount format by multiplying IDR by 100. Use `CR` as positive and `DB` as negative.
-4. Match first by exact posting date and amount.
-5. If the BCA description contains `TGL: MMDD`, also try that embedded transaction date with the same amount.
-6. Do not use broad nearby-date matching as proof. Nearby same-amount rows are review hints only.
-7. Ignore `imported_id` for matching. It identifies the n8n or Gmail import source, not the BCA CSV row.
-
-## Duplicates and review hints
-
-Same-date, same-amount duplicates are expected. Actual deduplicates n8n imports, so duplicate imports are unlikely.
-
-For duplicate groups, compare counts by date and amount. If CSV and Actual have the same count, treat the group as reconciled. If counts differ, report the excess source rows as missing candidates and include nearby Actual rows as hints.
-
-Use `review-candidates.json` for rows that have same-amount Actual rows nearby. These are not matches. They point to settlement lag or date parsing issues that need human review.
-
-## Artifacts
-
-Write reconciliation artifacts under `.reconcile/<source>/latest/`:
-
-- `actual-query.json`: raw Actual query output
-- `parsed-csv.json`: normalized source transactions
-- `actual-transactions.json`: normalized Actual transactions
-- `missing-candidates.json`: source rows with no Actual match
-- `review-candidates.json`: missing candidates with nearby same-amount Actual hints
-- `approval-candidates.json`: proposed Actual transactions for missing rows
-- `approval.md`: checkbox review file for human approval
-- `duplicate-groups.json`: date and amount groups where counts differ or duplicates exist
-- `reconcile-result.json`: full result, including matches and unmatched Actual rows
-- `report.md`: human-readable local report
-
-For multiple CSVs, write each CSV's artifacts under `.reconcile/<source>/by-csv/<csv-stem>/`.
-
-For Jago, `.reconcile/jago/latest/` contains only:
-
-- `approval-candidates.json`
-- `approval.md`
-- `ledger-requeue-candidates.md`
-- `safe-pdf-backfill-approval.md`
-- `recommended-balance-fix-candidates.md`
-- `recommended-approval.md`
-- `report.md`
-
-These files contain personal financial data. Keep `.reconcile/` gitignored.
+- BCA Mobile shows 10,000 less than the bank ledger (a hold). The BCA day-end check therefore sits at a constant offset; only changes in that offset matter.
+- BCA charges the monthly admin fee around the 3rd for the month before. The schedule runs on the 3rd.
+- `updateSchedule` ignores `resetNextDate` unless a field changes; `apply` re-sends the name.
+- Cloud Run cold starts fail the first login with `network-failure`; the script warms `/info` and retries.
+- Exports and `.reconcile/` hold private financial data and stay gitignored. Summarize counts and totals; print rows only when the user asks.
 
 ## Tests
 
-Run the fixture tests after editing the script. Use an absolute path because Bun may ignore tests under hidden directories when passed as a relative pattern.
-
 ```bash
-bun test "$PWD/.agents/skills/reconciling-actual-accounts/scripts/reconcile-actual-account.test.ts"
-bun test tests/reconcile-jago-pdfs.test.ts
+bun test "$PWD/.agents/skills/reconciling-actual-accounts/scripts/reconcile.test.ts"
 ```
-
-## Safety
-
-- Do not print secrets from `.env`, Actual credentials, session tokens, sync IDs, or encryption passwords.
-- Treat bank exports, reconciliation artifacts, transaction descriptions, and amounts as private. Summarize counts unless the user asks for detailed rows.
-- Ask before any Actual mutation. Report-only is the default.
-- Do not use Actual CLI for Terraform, GCP, Cloud Run, bucket, IAM, or domain mapping changes.
