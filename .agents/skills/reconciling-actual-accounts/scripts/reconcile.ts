@@ -400,7 +400,7 @@ export function matchRows(src: SourceRow[], act: ActualRow[]): MatchResult {
 // ---------- Actual session ----------
 
 /** The global `actual` CLI bundles @actual-app/api; use that copy so CLI and script share one version. */
-async function openActual() {
+export async function openActual() {
   const bin = Bun.which("actual");
   if (!bin) throw new Error("The `actual` CLI is not on PATH");
   const api: any = await import(join(dirname(realpathSync(bin)), "../../api/dist/index.js"));
