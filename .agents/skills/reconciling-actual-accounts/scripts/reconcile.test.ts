@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
-import { type ActualData, type ActualRow, buildPlan, dropReversals, isJagoInternal, jagoFrom, jagoLatestBalance, matchRows, parseBalance, parseBcaStatement, parseJagoText, parseKlikbcaCsv, type Source, type SourceRow } from "./reconcile";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { type ActualData, type ActualRow, buildPlan, fingerprint, loadShopeepay, dropReversals, isJagoInternal, jagoFrom, jagoLatestBalance, matchRows, parseBalance, parseBcaStatement, parseJagoText, parseKlikbcaCsv, type Source, type SourceRow } from "./reconcile";
 
 const statement = `
         01/07         SALDO AWAL                                                                                                             100,000.00
@@ -129,6 +132,8 @@ test("plans deletes, transfer links, export gaps and residuals", () => {
           act("pln", "2026-08-05", -10_175_000, false, { importedId: "mail1" }),
           act("pln-fee", "2026-08-05", -175_000, false, { importedId: "mail1admin" }),
           act("topup", "2026-08-06", -5_000_000, false, { payeeName: "Shopee" }),
+          act("big", "2026-08-07", -2_000_000, false, { importedId: "mail2" }),
+          act("big-admin", "2026-08-07", -5_000_000, false, { importedId: "mail2admin" }),
         ],
       ],
       ["sp", []],
@@ -137,17 +142,62 @@ test("plans deletes, transfer links, export gaps and residuals", () => {
     schedules: [],
   } as unknown as ActualData;
   const sources = new Map<string, Source>([
-    ["BCA", { rows: [{ ...src("2026-08-05", -10_175_000) }, { ...src("2026-08-06", -5_000_000), description: "TRSF E-BANKING DB SHOPEEPAY" }], from: "2026-08-01", to: "2026-08-06", target: -15_175_000 + 3, label: "BCA Mobile" }],
+    ["BCA", { rows: [{ ...src("2026-08-05", -10_175_000) }, { ...src("2026-08-06", -5_000_000), description: "TRSF E-BANKING DB SHOPEEPAY" }, src("2026-08-07", -2_000_000)], from: "2026-08-01", to: "2026-08-07", target: -22_175_000 + 3, label: "BCA Mobile" }],
     ["ShopeePay", { rows: [{ ...src("2026-08-06", 5_000_000), description: "Top Up BCA" }], from: "2026-08-10", to: "2026-08-06", target: 5_000_000, label: "ShopeePay" }],
   ]);
   const [bca, sp] = buildPlan(actual, sources, {}).plans;
   expect(bca!.deletes.map((d) => d.id)).toEqual(["pln-fee"]);
   expect(bca!.updates.filter((u) => u.id === "topup").map((u) => u.fields)).toEqual([{ cleared: true }, { payee: "to-sp" }]);
   expect(bca!.adds.map((a) => [a.kind, a.amount])).toEqual([["adjustment", 3]]);
-  expect(bca!.blockers).toEqual([]);
+  // A 50,000 "admin" row is too big to be a bank fee, so it is not deleted silently.
+  expect(bca!.blockers).toEqual([expect.stringContaining("(id big-admin)")]);
   expect(sp!.adds).toEqual([]);
   expect(sp!.after).toBe(5_000_000);
   expect(sp!.blockers).toEqual([expect.stringContaining("exports start 2026-08-10")]);
+});
+
+test("links a missing transfer to a plain row in an account planned later", () => {
+  const actual = {
+    accounts: [
+      { id: "bca", name: "BCA", last_reconciled: String(Date.parse("2026-08-01T05:00:00Z")) },
+      { id: "sp", name: "ShopeePay", last_reconciled: String(Date.parse("2026-08-01T05:00:00Z")) },
+    ],
+    payees: [
+      { id: "to-bca", name: "", transfer_acct: "bca" },
+      { id: "to-sp", name: "", transfer_acct: "sp" },
+    ],
+    rowsByAccount: new Map([
+      ["bca", []],
+      ["sp", [act("sp-topup", "2026-08-06", 5_000_000, false, { payeeName: "Top up" })]],
+    ]),
+    lastCategory: new Map(),
+    schedules: [],
+  } as unknown as ActualData;
+  const sources = new Map<string, Source>([
+    ["BCA", { rows: [{ ...src("2026-08-06", -5_000_000), description: "TRSF E-BANKING DB SHOPEEPAY" }], from: "2026-08-01", to: "2026-08-06", target: -5_000_000, label: "BCA Mobile" }],
+    ["ShopeePay", { rows: null, from: null, to: null, target: 5_000_000, label: "ShopeePay" }],
+  ]);
+  const [bca, sp] = buildPlan(actual, sources, {}).plans;
+  expect(bca!.adds).toEqual([]);
+  expect(bca!.after).toBe(-5_000_000);
+  expect(sp!.updates.map((u) => [u.id, u.fields])).toEqual([["sp-topup", { payee: "to-bca" }]]);
+  expect(sp!.adds).toEqual([]);
+  expect(fingerprint(actual, [bca!, sp!])).toBe(fingerprint(actual, [bca!, sp!]));
+  actual.rowsByAccount.get("sp")!.push(act("n8n", "2026-08-08", -1_000));
+  expect(fingerprint(actual, [bca!, sp!])).not.toBe(fingerprint({ ...actual, rowsByAccount: new Map([["sp", []]]) }, [bca!, sp!]));
+});
+
+test("ShopeePay history needs its start date", () => {
+  const dir = mkdtempSync(join(tmpdir(), "shopeepay-"));
+  writeFileSync(join(dir, "history.csv"), "date,amount,description\n2026-10-20,-25000,Shopee Marketplace\n");
+  expect(() => loadShopeepay(dir)).toThrow(/# from/);
+  writeFileSync(join(dir, "history.csv"), "# from 2026-10-01\ndate,amount,description\n2026-10-20,-25000,Shopee Marketplace\n");
+  expect(loadShopeepay(dir)).toMatchObject({ from: "2026-10-01", rows: [{ date: "2026-10-20", amount: -2_500_000 }] });
+});
+
+test("KlikBCA rows must follow their own running balance", () => {
+  const csv = "'01/10/2026,A,'0000,100.00,DB,900.00\n'02/10/2026,B,'0000,50.00,DB,800.00";
+  expect(() => parseKlikbcaCsv(csv, "x.CSV")).toThrow(/does not follow/);
 });
 
 test("reads typed balances in either separator style", () => {

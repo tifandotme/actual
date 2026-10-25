@@ -9,7 +9,7 @@ An Actual Budget account that represents multiple real-world balances managed as
 _Avoid_: Combined account, app account
 
 **Internal row**:
-A source export row that moves money only between balances inside the same merged Actual account. It is not income, expense, or an Actual transfer.
+A source export row that moves money only between balances inside the same merged Actual account. It is not income, expense, or an Actual transfer. A card charge and its PSD02-R reversal are handled the same way: both count toward the day-end check, and neither reaches Actual.
 _Avoid_: Transfer, transaction
 
 **External row**:
@@ -25,5 +25,5 @@ Marking every cleared row of an account reconciled and stamping the account's `l
 _Avoid_: Close, finalize
 
 **Day-end check**:
-Comparing Actual's running balance after the plan with the bank's balance at the end of each day. A steady offset is fine; a change that persists marks a missing or wrong row.
+Comparing Actual's running balance after the plan with the bank's balance at the end of each day. A steady offset is fine (BCA's ledger runs 10,000 above BCA Mobile because of a hold); a change that lasts 4 or more days blocks the run.
 _Avoid_: Daily diff

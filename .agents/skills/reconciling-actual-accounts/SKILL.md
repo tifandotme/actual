@@ -5,7 +5,7 @@ description: Reconciles Actual Budget accounts (BCA, Jago, ShopeePay, Cash) with
 
 # Reconciling Actual accounts
 
-One run closes every on-budget account from its last reconcile to today: BCA, `Jago (Utama+GoPay)`, ShopeePay, Cash. The user's steps are in [MANUAL.md](MANUAL.md); point them there when inputs are missing.
+One run locks every on-budget account from its last lock to today: BCA, `Jago (Utama+GoPay)`, ShopeePay, Cash. The user's steps are in [MANUAL.md](MANUAL.md); point them there when inputs are missing.
 
 ```bash
 s=.agents/skills/reconciling-actual-accounts/scripts/reconcile.ts
@@ -20,12 +20,13 @@ bun $s apply
 1. **Inputs.** Get the three balances from the user. Check that `exports/` holds what MANUAL.md lists. If `exports/shopeepay/` has screenshots, transcribe the ShopeePay Balance rows dated on or after the ShopeePay last reconcile into `exports/shopeepay/history.csv`:
 
    ```csv
+   # from 2026-10-01
    date,amount,description
    2026-10-20,-25000,Shopee Marketplace
    2026-10-21,50000,Top Up BCA
    ```
 
-   Signed IDR, newest or oldest first. Without the file, ShopeePay closes by a balance adjustment.
+   `# from` is the oldest date the screenshots reach; list every row from that date on. Signed IDR, any order. Without the file, ShopeePay balances by an adjustment.
 
 2. **Plan.** Run `plan`. Done when it prints no `BLOCKERS`. For each blocker, investigate with the exports and Actual (`using-actual-cli`), then record the decision in `.reconcile/<today>/decisions.json` and re-run `plan`:
 
@@ -43,15 +44,16 @@ bun $s apply
      "delete": [{ "id": "<actual id>", "reason": "..." }],
      "keep": ["<actual id>"],
      "update": [{ "id": "<actual id>", "fields": { "amount": -1250000 }, "reason": "..." }],
-     "adjust": { "<account>": "<reason for a balance adjustment>" }
+     "adjust": { "<account>": "<reason for a balance adjustment>" },
+     "dayEnd": { "<account>": "<why its day-end gaps are expected>" }
    }
    ```
 
-   Use `adjust` only when the cause is known and no row can carry it. A **day-end check** line marks a window where Actual and the bank drift apart; a gap that opens and closes within 4 days is settlement lag, a gap that stays is a missing or wrong row.
+   Use `adjust` only when the cause is known and no row can carry it. A **day-end check** line marks 4+ days where Actual and the bank drift apart, and blocks the run: find the misdated or missing row, or record in `dayEnd` why the drift is expected (for example a row the bank posted 5 days late).
 
 3. **Approve.** Show the user the account table from PLAN.md and summarize each account's adds, deletes, updates, and decisions. Wait for "apply".
 
-4. **Apply.** Run `apply`. It backs up `.actual-cache` to `.reconcile/<today>/backup/`, then deletes, updates, adds (transfers create their counterpart), advances linked schedules, checks every balance against the bank, and locks the accounts. Each step (and each account's adds) leaves a `.done-*` marker, so a rerun after a failure resumes; `plan` clears the markers. Done when it prints every account at its bank balance.
+4. **Apply.** Run `apply`. It stops if Actual changed since `plan` (re-run `plan` and get approval again). It backs up `.actual-cache` to `.reconcile/<today>/backup/`, then deletes, updates, adds (transfers create their counterpart), checks every balance against the bank, advances linked schedules, and locks the accounts. Each step (and each account's adds) leaves a `.done-*` marker, so a rerun after a failure resumes; `plan` clears the markers. Done when it prints every account at its bank balance.
 
 5. Offer `/categorizing-actual-transactions` for added rows without a category.
 

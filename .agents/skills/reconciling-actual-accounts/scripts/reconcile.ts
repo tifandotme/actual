@@ -4,6 +4,7 @@
 //   apply : backs up, applies plan.json, verifies balances, locks the accounts
 // Amounts are Actual integers (IDR x 100) throughout.
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
@@ -15,6 +16,8 @@ const SHOPEEPAY = "ShopeePay";
 const CASH = "Cash";
 const MATCH_DAYS = 4;
 const REDATE_DAYS = 31;
+/** Largest bank fee (cents) an n8n "…admin" row can be; myBCA fees are a few thousand rupiah. */
+const MAX_FEE = 1_000_000;
 
 interface Rule {
   account: string;
@@ -82,7 +85,7 @@ const listFiles = (dir: string, ext: RegExp) => (existsSync(dir) ? readdirSync(d
 // ---------- BCA: BCA Mobile monthly statement PDF ----------
 
 const ID_MONTHS: Record<string, number> = { JAN: 1, FEB: 2, MAR: 3, APR: 4, MEI: 5, JUN: 6, JUL: 7, AGU: 8, AGT: 8, SEP: 9, OKT: 10, NOV: 11, DES: 12 };
-const comma = (s: string) => Math.round(Number(s.replace(/,/g, "")) * 100);
+const bcaCents = (s: string) => Math.round(Number(s.replace(/,/g, "")) * 100);
 
 /** Parses one statement and proves it against its own running balances and SALDO AKHIR. */
 export function parseBcaStatement(text: string, fileName: string) {
@@ -101,21 +104,21 @@ export function parseBcaStatement(text: string, fileName: string) {
     const body = s[3]!;
     const m = body.match(money);
     if (/^SALDO AWAL/.test(body)) {
-      bal = comma(m![1]!);
+      bal = bcaCents(m![1]!);
       continue;
     }
     if (bal == null) throw new Error(`${fileName}: SALDO AWAL missing`);
     if (!m) throw new Error(`${fileName} line ${i + 1}: no amount in "${body}"`);
     const desc = [body.slice(0, body.length - m[0].length)];
     for (let j = i + 1; j < lines.length && lines[j]!.trim() !== "" && !start.test(lines[j]!); j++) desc.push(lines[j]!);
-    bal += comma(m[1]!) * (m[2] ? -1 : 1);
-    if (m[3] && comma(m[3]) !== bal) throw new Error(`${fileName} line ${i + 1}: running balance ${idr(bal)} but statement prints ${m[3]}`);
+    bal += bcaCents(m[1]!) * (m[2] ? -1 : 1);
+    if (m[3] && bcaCents(m[3]) !== bal) throw new Error(`${fileName} line ${i + 1}: running balance ${idr(bal)} but statement prints ${m[3]}`);
     if (Number(s[2]) !== month) throw new Error(`${fileName} line ${i + 1}: row month ${s[2]} outside statement period`);
-    rows.push({ ref: `BCA statement ${period[1]!.toUpperCase()} ${year} line ${i + 1}`, date: `${year}-${s[2]}-${s[1]}`, amount: comma(m[1]!) * (m[2] ? -1 : 1), description: clean(desc.join(" ")), balance: bal, pocket: "main" });
+    rows.push({ ref: `BCA statement ${period[1]!.toUpperCase()} ${year} line ${i + 1}`, date: `${year}-${s[2]}-${s[1]}`, amount: bcaCents(m[1]!) * (m[2] ? -1 : 1), description: clean(desc.join(" ")), balance: bal, pocket: "main" });
   }
   const closing = text.match(/SALDO AKHIR\s*:\s*([\d,]+\.\d{2})/);
   if (bal == null || !closing) throw new Error(`${fileName}: SALDO AWAL or SALDO AKHIR missing`);
-  if (bal !== comma(closing[1]!)) throw new Error(`${fileName}: rows end at ${idr(bal)} but SALDO AKHIR is ${closing[1]}`);
+  if (bal !== bcaCents(closing[1]!)) throw new Error(`${fileName}: rows end at ${idr(bal)} but SALDO AKHIR is ${closing[1]}`);
   const from = `${year}-${String(month).padStart(2, "0")}-01`;
   const to = new Date(Date.UTC(year, month, 0)).toISOString().slice(0, 10);
   return { from, to, rows };
@@ -152,9 +155,12 @@ export function parseKlikbcaCsv(text: string, fileName: string) {
     const d = clean(f[0]).replace(/^'/, "").match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
     const dir = clean(f[4]);
     if (!d || (dir !== "CR" && dir !== "DB")) return;
-    rows.push({ ref: `BCA CSV ${basename(fileName)} row ${i + 1}`, date: `${d[3]}-${d[2]}-${d[1]}`, amount: comma(clean(f[3])) * (dir === "CR" ? 1 : -1), description: clean(f[1]), balance: comma(clean(f[5])), pocket: "main" });
+    rows.push({ ref: `BCA CSV ${basename(fileName)} row ${i + 1}`, date: `${d[3]}-${d[2]}-${d[1]}`, amount: bcaCents(clean(f[3])) * (dir === "CR" ? 1 : -1), description: clean(f[1]), balance: bcaCents(clean(f[5])), pocket: "main" });
   });
   if (!rows.length) throw new Error(`${fileName}: no transaction rows`);
+  rows.forEach((r, i) => {
+    if (i > 0 && rows[i - 1]!.balance! + r.amount !== r.balance) throw new Error(`${r.ref}: balance ${idr(r.balance!)} does not follow from the row before; a row was not parsed`);
+  });
   return { from: rows[0]!.date, to: rows.at(-1)!.date, rows };
 }
 
@@ -233,7 +239,7 @@ export function parseJagoText(text: string, path = "fixture.pdf"): JagoRow[] {
   const header = text.split(/\r?\n/).find((l) => l.includes("Tanggal & Waktu") && l.includes("Sumber/Tujuan"));
   const pos = header
     ? { source: header.indexOf("Sumber/Tujuan"), detail: header.indexOf("Rincian Transaksi"), note: header.indexOf("Catatan") }
-    : { source: 18, detail: 48, note: 93 };
+    : { source: 18, detail: 48, note: 93 }; // ponytail: column offsets from the 2026 PDF layout; a new layout needs new numbers
   const col = (l: string, a: number, b?: number) => (l.length > a ? l.slice(a, b).trim() : "");
   const noise = /PT Bank Jago|Otoritas Jasa|Lembaga Penjamin|www\.jago\.com|Pockets Transactions History|Halaman \d+ dari|Menampilkan transaksi|Saldo terbaru|Tanggal & Waktu/;
   const lines = text.split(/\r?\n/);
@@ -293,7 +299,9 @@ export function loadJago(dir: string): { rows: SourceRow[]; from: string; to: st
   for (const { p, t } of texts) {
     const parsed = parseJagoText(t, p);
     breaks.push(...parsed.filter((b, i) => i > 0 && parsed[i - 1]!.balance! + b.amount !== b.balance));
-    balance += jagoLatestBalance(t, p);
+    const latest = jagoLatestBalance(t, p);
+    if (parsed.at(-1)?.balance !== latest) throw new Error(`${basename(p)}: last row ends at ${idr(parsed.at(-1)?.balance ?? 0)} but Saldo terbaru is ${idr(latest)}; a row was not parsed`);
+    balance += latest;
     const external = new Set(dropReversals(parsed.filter((r) => !isJagoInternal(r))));
     // Internal rows and reversal pairs stay, in PDF order, for the day-end balance; matching skips them.
     rows.push(...parsed.map(({ sourceTarget: _s, detail: _d, jagoIds: _j, ...r }, i) => (external.has(parsed[i]!) ? r : { ...r, internal: true })));
@@ -305,16 +313,21 @@ export function loadJago(dir: string): { rows: SourceRow[]; from: string; to: st
 
 // ---------- ShopeePay: history.csv transcribed from screenshots ----------
 
-export function loadShopeepay(dir: string): SourceRow[] | null {
+/** `# from YYYY-MM-DD` on the first line is the oldest date the screenshots reach; every row from then on is listed. */
+export function loadShopeepay(dir: string): { rows: SourceRow[]; from: string } | null {
   const path = join(dir, "history.csv");
   if (!existsSync(path)) return null;
   const lines = readFileSync(path, "utf8").trim().split(/\r?\n/);
-  if (lines[0] !== "date,amount,description") throw new Error(`${path}: header must be "date,amount,description"`);
-  return lines.slice(1).map((l, i) => {
+  const from = lines[0]?.match(/^# from (\d{4}-\d{2}-\d{2})$/)?.[1];
+  if (!from) throw new Error(`${path}: first line must be "# from YYYY-MM-DD", the oldest date the screenshots reach`);
+  if (lines[1] !== "date,amount,description") throw new Error(`${path}: second line must be "date,amount,description"`);
+  const rows = lines.slice(2).map((l, i) => {
     const [date, amount, ...rest] = l.split(",");
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date ?? "") || !/^-?\d+(\.\d{1,2})?$/.test(amount ?? "")) throw new Error(`${path} line ${i + 2}: expected YYYY-MM-DD,<signed IDR>,<text>`);
-    return { ref: `ShopeePay history.csv line ${i + 2}`, date: date!, amount: Math.round(Number(amount) * 100), description: clean(rest.join(",")), balance: null, pocket: "main" };
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date ?? "") || !/^-?\d+(\.\d{1,2})?$/.test(amount ?? "")) throw new Error(`${path} line ${i + 3}: expected YYYY-MM-DD,<signed IDR>,<text>`);
+    if (date! < from) throw new Error(`${path} line ${i + 3}: ${date} is before "# from ${from}"`);
+    return { ref: `ShopeePay history.csv line ${i + 3}`, date: date!, amount: Math.round(Number(amount) * 100), description: clean(rest.join(",")), balance: null, pocket: "main" };
   });
+  return { rows, from };
 }
 
 // ---------- matching ----------
@@ -338,7 +351,10 @@ export interface MatchResult {
   extra: ActualRow[];
 }
 
-/** Exact date first, then nearest within MATCH_DAYS, then two Actual rows summing to one bank row, then a far same-amount row to redate. */
+/**
+ * Exact date first, then nearest within MATCH_DAYS, then two Actual rows summing to one bank row, then a far same-amount row to redate.
+ * ponytail: greedy and O(source x Actual) per pass; fine for a few hundred rows a month. If wrong pairs show up, switch to assignment by total date distance.
+ */
 export function matchRows(src: SourceRow[], act: ActualRow[]): MatchResult {
   const used = new Set<string>();
   const done = new Set<SourceRow>();
@@ -459,6 +475,8 @@ export interface Decisions {
   keep?: string[];
   update?: { id: string; fields: Record<string, unknown>; reason: string }[];
   adjust?: Record<string, string>;
+  /** Account name -> why its day-end check gaps are expected. */
+  dayEnd?: Record<string, string>;
 }
 
 export interface Source {
@@ -503,6 +521,8 @@ export function buildPlan(actual: ActualData, sources: Map<string, Source>, deci
     return row;
   };
   const plans: AccountPlan[] = [];
+  const pendingUpdates = new Map<string, AccountPlan["updates"]>(); // payee links for accounts not planned yet
+  const linkedTwins = new Set<string>();
   const skip = new Set(decisions.skip ?? []);
   const keep = new Set(decisions.keep ?? []);
   const today = localDate(Date.now());
@@ -515,6 +535,7 @@ export function buildPlan(actual: ActualData, sources: Map<string, Source>, deci
     if (!lockDate) throw new Error(`${name} was never reconciled; pass --since YYYY-MM-DD`);
     const p: AccountPlan = { name, id: acct.id, lockDate, now: all.filter((r) => !r.planned).reduce((t, r) => t + r.amount, 0), target: src.target, targetLabel: src.label, after: 0, adds: [], deletes: [], updates: [], matched: {}, blockers: [], checks: [] };
     plans.push(p);
+    p.updates.push(...(pendingUpdates.get(name) ?? []));
     if (src.from && src.from > lockDate) p.blockers.push(`${src.label} exports start ${src.from}, but the last reconcile is ${lockDate}. Add the missing export (see MANUAL.md); do not delete Actual rows for this gap.`);
     for (const b of src.breaks ?? []) if (b.date >= lockDate) p.blockers.push(`${b.ref} on ${b.date}: running balance does not follow from the row before; the parser missed a row.`);
 
@@ -533,7 +554,7 @@ export function buildPlan(actual: ActualData, sources: Map<string, Source>, deci
       const matchedIds = new Set(m.pairs.flatMap((pr) => pr.act.map((a) => a.importedId)));
       for (const x of m.extra) {
         if (x.reconciled || x.planned || x.date < lockDate || (src.to && x.date > src.to) || keep.has(x.id)) continue;
-        if (x.importedId?.endsWith("admin") && matchedIds.has(x.importedId.slice(0, -5)))
+        if (x.importedId?.endsWith("admin") && matchedIds.has(x.importedId.slice(0, -5)) && x.amount < 0 && x.amount >= -MAX_FEE)
           p.deletes.push({ id: x.id, date: x.date, amount: x.amount, label: x.payeeName ?? "", reason: "n8n fee row; the bank charged this fee inside the matched payment" });
         else if (!(decisions.delete ?? []).some((d) => d.id === x.id))
           p.blockers.push(`Actual row not in ${src.label}: ${x.date} ${idr(x.amount)} ${x.payeeName ?? x.notes ?? ""} (id ${x.id}). Decide: delete or keep.`);
@@ -544,21 +565,25 @@ export function buildPlan(actual: ActualData, sources: Map<string, Source>, deci
         const o = decisions.override?.[s.ref] ?? {};
         const rule = RULES.find((r) => r.account === name && r.test.test(s.description));
         const transfer = o.transfer ?? (o.payee ? undefined : rule?.transfer);
-        // The other account is already planned, so a new transfer would duplicate its row: link that row instead.
-        const other = transfer ? plans.find((x) => x.name === transfer && x !== p) : undefined;
-        if (other) {
-          const twin = (actual.rowsByAccount.get(other.id) ?? []).find(
-            (r) => !r.reconciled && !r.transferId && r.amount === -s.amount && days(r.date, s.date) <= MATCH_DAYS && !other.updates.some((u) => u.id === r.id && "payee" in u.fields),
-          );
-          if (!twin) {
-            p.blockers.push(`${s.ref} ${s.date} ${idr(s.amount)} is a transfer with ${transfer}, but ${transfer} has no unlinked ${idr(-s.amount)} row within ${MATCH_DAYS} days.`);
-            continue;
-          }
-          other.updates.push({ id: twin.id, date: twin.date, amount: twin.amount, label: twin.payeeName ?? "", fields: { payee: transferPayee(name) }, reason: `transfer with ${name}; Actual creates the ${name} side (${s.ref})` });
-          all.push(addPlanned(name, twin.date, s.amount, other.name, s.ref));
+        // When the other account already has this movement as a plain row, turn that row into the transfer:
+        // Actual then creates this side. A new transfer would duplicate the other side instead.
+        const otherId = transfer ? acctByName.get(transfer)?.id : undefined;
+        const twin = otherId
+          ? (actual.rowsByAccount.get(otherId) ?? []).find((r) => !r.reconciled && !r.transferId && !linkedTwins.has(r.id) && r.amount === -s.amount && days(r.date, s.date) <= MATCH_DAYS)
+          : undefined;
+        if (transfer && twin) {
+          linkedTwins.add(twin.id);
+          const link = { id: twin.id, date: twin.date, amount: twin.amount, label: twin.payeeName ?? "", fields: { payee: transferPayee(name) }, reason: `transfer with ${name}; Actual creates the ${name} side (${s.ref})` };
+          const other = plans.find((x) => x.name === transfer);
+          if (other) other.updates.push(link);
+          else (pendingUpdates.get(transfer) ?? pendingUpdates.set(transfer, []).get(transfer)!).push(link);
+          all.push(addPlanned(name, twin.date, s.amount, transfer, s.ref));
           continue;
         }
-        // Only fixed-amount schedules link by amount; a range (variable bill) accepts too much. RULES name those.
+        if (transfer && plans.some((x) => x.name === transfer && x !== p)) {
+          p.blockers.push(`${s.ref} ${s.date} ${idr(s.amount)} is a transfer with ${transfer}, but ${transfer} has no unlinked ${idr(-s.amount)} row within ${MATCH_DAYS} days.`);
+          continue;
+        }
         const byAmount = transfer ? [] : actual.schedules.filter((x) => !x.completed && x.account === acct.id && x.amount === s.amount);
         const sched = actual.schedules.find((x) => x.name === (o.schedule ?? rule?.schedule)) ?? (byAmount.length === 1 ? byAmount[0] : undefined);
         const payee = transfer ? transferPayee(transfer) : ((o.payee && payeeId(o.payee)) ?? (sched?.payee as string | undefined) ?? (rule?.payee ? payeeId(rule.payee) : undefined));
@@ -594,10 +619,17 @@ export function buildPlan(actual: ActualData, sources: Map<string, Source>, deci
       } else p.blockers.push(`After the plan ${name} is ${idr(p.after)} but ${src.label} says ${idr(p.target!)} (difference ${idr(residual)}). See the day-end check.`);
     }
     if (src.rows) p.checks = dayEndCheck(p, src.rows, all, lockDate);
+    if (p.checks.length && !decisions.dayEnd?.[name]) p.blockers.push(`${name} drifts from ${src.label} for ${MATCH_DAYS}+ days (see Day-end check). Find the row, or record why in decisions.dayEnd.`);
   }
 
   const linked = [...new Set(plans.flatMap((p) => p.adds.flatMap((a) => (a.txn.schedule ? [a.txn.schedule as string] : []))))];
   return { plans, linkedSchedules: linked.map((id) => ({ id, name: actual.schedules.find((s) => s.id === id)?.name ?? id })) };
+}
+
+/** Changes whenever a row in a planned account is added, removed, or edited. */
+export function fingerprint(actual: ActualData, plans: { id: string }[]): string {
+  const rows = plans.map((p) => (actual.rowsByAccount.get(p.id) ?? []).map((r) => [r.id, r.date, r.amount, r.cleared, r.reconciled, r.transferId]).sort());
+  return createHash("sha256").update(JSON.stringify(rows)).digest("hex");
 }
 
 export async function plan(opts: { run: string; exports: string; balances: Map<string, number>; since?: string }) {
@@ -608,7 +640,7 @@ export async function plan(opts: { run: string; exports: string; balances: Map<s
   const jago = loadJago(join(opts.exports, "jago"));
   sources.set(JAGO, { rows: jago.rows, from: jago.from, to: jago.to, target: opts.balances.get(JAGO) ?? jago.balance, label: "Jago PDFs (Saldo terbaru)", breaks: jago.breaks });
   const sp = loadShopeepay(join(opts.exports, "shopeepay"));
-  sources.set(SHOPEEPAY, { rows: sp, from: null, to: sp?.at(-1)?.date ?? null, target: opts.balances.get(SHOPEEPAY)!, label: sp ? "ShopeePay app + history.csv" : "ShopeePay app (no history.csv)" });
+  sources.set(SHOPEEPAY, { rows: sp?.rows ?? null, from: sp?.from ?? null, to: localDate(Date.now()), target: opts.balances.get(SHOPEEPAY)!, label: sp ? "ShopeePay app + history.csv" : "ShopeePay app (no history.csv)" });
   sources.set(CASH, { rows: null, from: null, to: null, target: opts.balances.get(CASH)!, label: "counted" });
   for (const [name, v] of opts.balances) if (!sources.has(name)) sources.set(name, { rows: null, from: null, to: null, target: v, label: "typed" });
   const decisionsPath = join(opts.run, "decisions.json");
@@ -616,15 +648,18 @@ export async function plan(opts: { run: string; exports: string; balances: Map<s
 
   const { api } = await openActual();
   let out: ReturnType<typeof buildPlan>;
+  let actualState: string;
   try {
-    out = buildPlan(await readActual(api), sources, decisions, opts.since);
+    const actual = await readActual(api);
+    out = buildPlan(actual, sources, decisions, opts.since);
+    actualState = fingerprint(actual, out.plans);
   } finally {
     await api.shutdown();
   }
   mkdirSync(opts.run, { recursive: true });
   // A new plan starts apply from step 1; old markers would make it skip steps this plan needs.
   for (const f of readdirSync(opts.run)) if (f.startsWith(".done-")) rmSync(join(opts.run, f));
-  writeFileSync(join(opts.run, "plan.json"), JSON.stringify({ createdAt: new Date().toISOString(), ...out }, null, 2));
+  writeFileSync(join(opts.run, "plan.json"), JSON.stringify({ createdAt: new Date().toISOString(), actualState, ...out }, null, 2));
   writeFileSync(join(opts.run, "PLAN.md"), renderPlan(out.plans, out.linkedSchedules.map((s) => s.name)));
   return out.plans;
 }
@@ -651,6 +686,7 @@ function dayEndCheck(p: AccountPlan, src: SourceRow[], all: ActualRow[], lockDat
   }
   if (!diffs.length) return [];
   // The usual offset is the baseline (BCA Mobile holds 10,000 the ledger still counts).
+  // ponytail: the most common offset wins; if most days were wrong this flags the right ones. Upgrade: anchor on the typed balance.
   const freq = new Map<number, number>();
   for (const [, d] of diffs) freq.set(d, (freq.get(d) ?? 0) + 1);
   const base = [...freq].sort((a, b) => b[1] - a[1])[0]![0];
@@ -695,15 +731,19 @@ export async function apply(run: string) {
   const plans: AccountPlan[] = out.plans;
   if (plans.some((p) => p.blockers.length)) throw new Error("Plan is blocked; resolve PLAN.md blockers and re-run plan");
   const { api, dataDir } = await openActual();
-  const step = async (n: string, label: string, fn: () => Promise<void>) => {
-    const marker = join(run, `.done-${n}`);
-    if (existsSync(marker)) return console.log(`${label}: already done`);
-    console.log(label);
-    await fn();
-    await api.sync();
-    writeFileSync(marker, new Date().toISOString());
-  };
   try {
+    // A fresh apply must see Actual as the plan saw it: a row n8n imported since then would be added twice.
+    // A resumed apply skips this, because its own earlier steps changed Actual.
+    const started = readdirSync(run).some((f) => f.startsWith(".done-") && f !== ".done-1-backup");
+    if (!started && fingerprint(await readActual(api), plans) !== out.actualState) throw new Error("Actual changed since plan.json was written; re-run plan and review it again");
+    const step = async (n: string, label: string, fn: () => Promise<void>) => {
+      const marker = join(run, `.done-${n}`);
+      if (existsSync(marker)) return console.log(`${label}: already done`);
+      console.log(label);
+      await fn();
+      await api.sync();
+      writeFileSync(marker, new Date().toISOString());
+    };
     await step("1-backup", "Back up the budget", async () => cpSync(dataDir, join(run, "backup"), { recursive: true }));
     await step("2-delete", "Delete rows", async () => {
       for (const p of plans) for (const d of p.deletes) await api.deleteTransaction(d.id);
@@ -721,14 +761,14 @@ export async function apply(run: string) {
         writeFileSync(marker, new Date().toISOString());
       }
     });
-    await step("5-schedules", "Advance linked schedules", async () => {
-      // updateSchedule ignores resetNextDate unless a field changes; re-sending the name counts as a change.
-      for (const s of out.linkedSchedules) await api.updateSchedule(s.id, { name: s.name }, true);
-    });
     const balances = Object.fromEntries(await Promise.all(plans.map(async (p) => [p.name, await api.getAccountBalance(p.id)])));
     const wrong = plans.filter((p) => p.target != null && balances[p.name] !== p.target);
     for (const p of plans) console.log(`${p.name}: ${idr(balances[p.name])}${p.target == null ? "" : ` (bank ${idr(p.target)})`}`);
     if (wrong.length) throw new Error(`Not locking: ${wrong.map((p) => p.name).join(", ")} differ from the bank`);
+    await step("5-schedules", "Advance linked schedules", async () => {
+      // updateSchedule ignores resetNextDate unless a field changes; re-sending the name counts as a change.
+      for (const s of out.linkedSchedules) await api.updateSchedule(s.id, { name: s.name }, true);
+    });
     await step("6-lock", "Lock accounts", async () => {
       for (const p of plans.filter((x) => x.target != null)) {
         const rows: any[] = (await api.aqlQuery(api.q("transactions").filter({ account: p.id, reconciled: false }).select(["id", "cleared"]).options({ splits: "all" }))).data;
