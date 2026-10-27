@@ -40,6 +40,7 @@ resource "google_storage_bucket" "actual_bucket" {
   name          = "actual-bucket-new"
   location      = var.region
   storage_class = "STANDARD"
+  force_destroy = true
 
   uniform_bucket_level_access = true
   public_access_prevention    = "enforced"
@@ -67,9 +68,10 @@ resource "google_project_iam_member" "actual_sa_storage" {
 # CLOUD RUN
 
 resource "google_cloud_run_v2_service" "actual_server" {
-  name       = "actual-server"
-  location   = var.region
-  depends_on = [google_project_service.run]
+  name                = "actual-server"
+  location            = var.region
+  depends_on          = [google_project_service.run]
+  deletion_protection = false
 
   template {
     execution_environment = "EXECUTION_ENVIRONMENT_GEN2"
